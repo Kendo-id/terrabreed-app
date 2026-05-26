@@ -32,7 +32,7 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           CI: 1
-        run: npx expo prebuild --platform android --clean --non-interactive
+        run: npx expo prebuild --platform android --clean --no-install
 
       - name: Decode keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/app.keystore

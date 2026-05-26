@@ -27,7 +27,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -41,8 +40,6 @@ jobs:
 
       - name: Fix node_modules resolution for Gradle
         run: |
-          # react-native-reanimated 4.x build.gradle runs node scripts from android/ dir.
-          # Symlinking lets node find modules via the project root node_modules.
           ln -sf $GITHUB_WORKSPACE/node_modules $GITHUB_WORKSPACE/android/node_modules || true
           echo "NODE_PATH=$GITHUB_WORKSPACE/node_modules" >> $GITHUB_ENV
           echo "NODE_BINARY=$(which node)" >> $GITHUB_ENV
@@ -69,7 +66,7 @@ jobs:
             echo "Keystore: $(wc -c < android/app/release.keystore) bytes"
             echo "HAS_KEYSTORE=true" >> $GITHUB_ENV
           else
-            echo "No KEYSTORE_BASE64 secret — building debug APK"
+            echo "No KEYSTORE_BASE64 — building debug APK"
             echo "HAS_KEYSTORE=false" >> $GITHUB_ENV
           fi
 

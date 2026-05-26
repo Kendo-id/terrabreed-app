@@ -30,7 +30,7 @@ jobs:
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
           $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" >/dev/null 2>&1
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> $GITHUB_ENV
-          echo "NDK check: $(ls $ANDROID_SDK_ROOT/ndk/ 2>/dev/null)"
+          echo "NDK: $(ls $ANDROID_SDK_ROOT/ndk/ 2>/dev/null)"
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -48,45 +48,43 @@ jobs:
           printf 'org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8\n' >> ~/.gradle/gradle.properties
           printf 'org.gradle.daemon=false\n' >> ~/.gradle/gradle.properties
           printf 'org.gradle.parallel=false\n' >> ~/.gradle/gradle.properties
-          cat ~/.gradle/gradle.properties
 
       - name: Decode keystore
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/app.keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
+          echo "Keystore size: $(wc -c < android/app/release.keystore) bytes"
 
-      - name: Build release APK
+      - name: Build & sign release APK via Gradle
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace -Pandroid.ndkVersion=27.1.12297006 2>&1 | tee /tmp/gradle.log
-          tail -5 /tmp/gradle.log
+          ./gradlew assembleRelease \
+            --no-daemon \
+            -Pandroid.ndkVersion=27.1.12297006 \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
+            -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+            -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+            -Pandroid.injected.signing.key.password=$KEY_PASSWORD \
+            2>&1 | tee /tmp/gradle.log
+          echo "=== Build result ==="
+          find app/build/outputs/apk -name "*.apk" 2>/dev/null && echo "APK found!" || echo "No APK found"
 
-      - name: Sign APK
+      - name: Collect APK
         run: |
-          UNSIGNED=$(find android/app/build/outputs/apk/release/ -name "*.apk" | head -1)
-          echo "Signing: $UNSIGNED"
-          jarsigner -verbose \
-            -sigalg SHA256withRSA \
-            -digestalg SHA-256 \
-            -keystore /tmp/app.keystore \
-            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
-            -keypass "${{ secrets.KEY_PASSWORD }}" \
-            "$UNSIGNED" \
-            "${{ secrets.KEYSTORE_ALIAS }}"
-          echo "APK_PATH=$UNSIGNED" >> $GITHUB_ENV
-
-      - name: Zipalign APK
-        run: |
-          TOOLS=$(ls -d $ANDROID_SDK_ROOT/build-tools/* | sort -V | tail -1)
+          APK=$(find android/app/build/outputs/apk/release/ -name "*.apk" | head -1)
+          echo "APK found: $APK ($(wc -c < "$APK") bytes)"
           mkdir -p output
-          $TOOLS/zipalign -v 4 "$APK_PATH" output/TerraBreed.apk
-          echo "Done: $(ls -lh output/TerraBreed.apk)"
+          cp "$APK" output/TerraBreed-release.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: TerraBreed-APK
-          path: output/TerraBreed.apk
+          path: output/TerraBreed-release.apk
           retention-days: 30
 
       - name: Upload Gradle log on failure

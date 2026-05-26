@@ -1,0 +1,67 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: TerraBreed APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Expo prebuild (generate Android native code)
+        run: npx expo prebuild --platform android --clean --non-interactive
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/app.keystore
+
+      - name: Build unsigned release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Sign APK with jarsigner
+        run: |
+          UNSIGNED=$(find android/app/build/outputs/apk/release/ -name "*.apk" | head -1)
+          echo "Signing: $UNSIGNED"
+          jarsigner -verbose \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            -keystore /tmp/app.keystore \
+            -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
+            -keypass "${{ secrets.KEY_PASSWORD }}" \
+            "$UNSIGNED" \
+            "${{ secrets.KEYSTORE_ALIAS }}"
+          echo "APK_PATH=$UNSIGNED" >> $GITHUB_ENV
+
+      - name: Zipalign APK
+        run: |
+          TOOLS=$(ls -d $ANDROID_SDK_ROOT/build-tools/* | sort -V | tail -1)
+          mkdir -p output
+          $TOOLS/zipalign -v 4 "$APK_PATH" output/TerraBreed.apk
+          echo "Done: $(ls -lh output/TerraBreed.apk)"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TerraBreed-APK
+          path: output/TerraBreed.apk
+          retention-days: 30

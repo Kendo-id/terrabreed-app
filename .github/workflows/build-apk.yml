@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: TerraBreed APK
@@ -24,13 +27,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-
-      - name: Accept SDK licenses & install NDK 27
-        run: |
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" >/dev/null 2>&1
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> $GITHUB_ENV
-          echo "NDK: $(ls $ANDROID_SDK_ROOT/ndk/ 2>/dev/null)"
+          cache: gradle
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -42,45 +39,91 @@ jobs:
           EXPO_NO_TELEMETRY: 1
         run: npx expo prebuild --platform android --clean --no-install
 
-      - name: Configure Gradle memory
+      - name: Fix node_modules resolution for Gradle
+        run: |
+          # react-native-reanimated 4.x build.gradle runs node scripts from android/ dir.
+          # Symlinking lets node find modules via the project root node_modules.
+          ln -sf $GITHUB_WORKSPACE/node_modules $GITHUB_WORKSPACE/android/node_modules || true
+          echo "NODE_PATH=$GITHUB_WORKSPACE/node_modules" >> $GITHUB_ENV
+          echo "NODE_BINARY=$(which node)" >> $GITHUB_ENV
+
+      - name: Configure Gradle
         run: |
           mkdir -p ~/.gradle
           printf 'org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8\n' >> ~/.gradle/gradle.properties
           printf 'org.gradle.daemon=false\n' >> ~/.gradle/gradle.properties
           printf 'org.gradle.parallel=false\n' >> ~/.gradle/gradle.properties
 
-      - name: Decode keystore
+      - name: Accept SDK licenses & setup NDK
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
-          echo "Keystore size: $(wc -c < android/app/release.keystore) bytes"
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" >/dev/null 2>&1
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> $GITHUB_ENV
 
-      - name: Build & sign release APK via Gradle
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+            echo "Keystore: $(wc -c < android/app/release.keystore) bytes"
+            echo "HAS_KEYSTORE=true" >> $GITHUB_ENV
+          else
+            echo "No KEYSTORE_BASE64 secret — building debug APK"
+            echo "HAS_KEYSTORE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build signed release APK
+        if: env.HAS_KEYSTORE == 'true'
         working-directory: android
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          NODE_PATH: ${{ env.NODE_PATH }}
+          NODE_BINARY: ${{ env.NODE_BINARY }}
         run: |
-          ./gradlew assembleRelease \
-            --no-daemon \
+          ./gradlew assembleRelease --no-daemon \
             -Pandroid.ndkVersion=27.1.12297006 \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
             -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
             -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
             -Pandroid.injected.signing.key.password=$KEY_PASSWORD \
             2>&1 | tee /tmp/gradle.log
-          echo "=== Build result ==="
-          find app/build/outputs/apk -name "*.apk" 2>/dev/null && echo "APK found!" || echo "No APK found"
+          find app/build/outputs/apk -name "*.apk" || true
+
+      - name: Build debug APK (no keystore)
+        if: env.HAS_KEYSTORE == 'false'
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          NODE_PATH: ${{ env.NODE_PATH }}
+          NODE_BINARY: ${{ env.NODE_BINARY }}
+        run: |
+          ./gradlew assembleDebug --no-daemon \
+            -Pandroid.ndkVersion=27.1.12297006 \
+            2>&1 | tee /tmp/gradle.log
+          find app/build/outputs/apk -name "*.apk" || true
 
       - name: Collect APK
         run: |
-          APK=$(find android/app/build/outputs/apk/release/ -name "*.apk" | head -1)
-          echo "APK found: $APK ($(wc -c < "$APK") bytes)"
+          APK=$(find android/app/build/outputs/apk -name "*.apk" | head -1)
+          [ -z "$APK" ] && { echo "No APK!"; exit 1; }
+          echo "APK: $APK ($(du -sh "$APK" | cut -f1))"
           mkdir -p output
           cp "$APK" output/TerraBreed-release.apk
 
-      - name: Upload APK
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(date +'%Y%m%d-%H%M')"
+          gh release create "$TAG" output/TerraBreed-release.apk \
+            --title "TerraBreed $TAG" \
+            --notes "Build dari commit ${{ github.sha }}"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: TerraBreed-APK

@@ -1,4 +1,3 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, {
   createContext,
   useCallback,
@@ -7,7 +6,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { API } from "@/constants/api";
+import { AppState, AppStateStatus } from "react-native";
+import { API, apiFetch } from "@/constants/api";
 
 export interface SensorData {
   temp: number;
@@ -23,6 +23,7 @@ export interface DeviceStatus {
   heater: boolean;
   humidifier: boolean;
   fan: boolean;
+  spare: boolean;
   auto_mode: boolean;
   tray_tilted: boolean;
   tray_position: string;
@@ -62,6 +63,7 @@ const DEFAULT_STATUS: DeviceStatus = {
   heater: false,
   humidifier: false,
   fan: false,
+  spare: false,
   auto_mode: true,
   tray_tilted: false,
   tray_position: "center",
@@ -71,6 +73,7 @@ const DEFAULT_STATUS: DeviceStatus = {
 };
 
 const MAX_HISTORY = 60;
+const POLL_INTERVAL_MS = 3000;
 
 interface IncubatorContextType {
   sensor: SensorData;
@@ -95,10 +98,11 @@ export function IncubatorProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const appStateRef = useRef<AppStateStatus>("active");
 
   const fetchSensorData = useCallback(async () => {
     try {
-      const res = await fetch(API.sensorLatest, { signal: AbortSignal.timeout(5000) });
+      const res = await apiFetch(API.sensorLatest, { timeoutMs: 5000 });
       if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
       if (data.sensor && Object.keys(data.sensor).length > 0) {
@@ -111,7 +115,9 @@ export function IncubatorProvider({ children }: { children: React.ReactNode }) {
               humidity: next.humidity,
             };
             const updated = [...h, snap];
-            return updated.length > MAX_HISTORY ? updated.slice(updated.length - MAX_HISTORY) : updated;
+            return updated.length > MAX_HISTORY
+              ? updated.slice(updated.length - MAX_HISTORY)
+              : updated;
           });
           return next;
         });
@@ -130,7 +136,7 @@ export function IncubatorProvider({ children }: { children: React.ReactNode }) {
 
   const fetchIncubation = useCallback(async () => {
     try {
-      const res = await fetch(API.incubationCurrent, { signal: AbortSignal.timeout(5000) });
+      const res = await apiFetch(API.incubationCurrent, { timeoutMs: 5000 });
       if (!res.ok) return;
       const data = await res.json();
       setIncubation(data);
@@ -138,38 +144,58 @@ export function IncubatorProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const startPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
     fetchSensorData();
-    fetchIncubation();
     pollRef.current = setInterval(() => {
-      fetchSensorData();
-    }, 3000);
-  }, [fetchSensorData, fetchIncubation]);
+      if (appStateRef.current === "active") {
+        fetchSensorData();
+      }
+    }, POLL_INTERVAL_MS);
+  }, [fetchSensorData]);
 
   useEffect(() => {
     startPolling();
-    const incubationPoll = setInterval(fetchIncubation, 30000);
+    fetchIncubation();
+    const incubationPoll = setInterval(() => {
+      if (appStateRef.current === "active") {
+        fetchIncubation();
+      }
+    }, 30000);
+
+    const appStateSub = AppState.addEventListener("change", (nextState) => {
+      appStateRef.current = nextState;
+      if (nextState === "active") {
+        fetchSensorData();
+        fetchIncubation();
+      }
+    });
+
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       clearInterval(incubationPoll);
+      appStateSub.remove();
     };
-  }, [startPolling, fetchIncubation]);
+  }, [startPolling, fetchSensorData, fetchIncubation]);
 
-  const sendCommand = useCallback(async (command: string, value: unknown): Promise<boolean> => {
-    try {
-      const res = await fetch(API.command, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command, value }),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!res.ok) return false;
-      const data = await res.json();
-      await fetchSensorData();
-      return data.ok === true;
-    } catch {
-      return false;
-    }
-  }, [fetchSensorData]);
+  const sendCommand = useCallback(
+    async (command: string, value: unknown): Promise<boolean> => {
+      try {
+        const res = await apiFetch(API.command, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command, value }),
+          timeoutMs: 5000,
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        await fetchSensorData();
+        return data.ok === true;
+      } catch {
+        return false;
+      }
+    },
+    [fetchSensorData]
+  );
 
   const refreshNow = useCallback(() => {
     fetchSensorData();
@@ -178,7 +204,17 @@ export function IncubatorProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <IncubatorContext.Provider
-      value={{ sensor, status, incubation, history, isConnected, isLoading, lastUpdated, sendCommand, refreshNow }}
+      value={{
+        sensor,
+        status,
+        incubation,
+        history,
+        isConnected,
+        isLoading,
+        lastUpdated,
+        sendCommand,
+        refreshNow,
+      }}
     >
       {children}
     </IncubatorContext.Provider>

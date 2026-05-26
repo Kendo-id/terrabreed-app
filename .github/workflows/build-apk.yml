@@ -29,6 +29,9 @@ jobs:
         run: npm install --legacy-peer-deps
 
       - name: Expo prebuild (generate Android native code)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          CI: 1
         run: npx expo prebuild --platform android --clean --non-interactive
 
       - name: Decode keystore

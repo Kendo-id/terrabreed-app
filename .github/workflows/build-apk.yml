@@ -38,11 +38,11 @@ jobs:
           EXPO_NO_TELEMETRY: 1
         run: npx expo prebuild --platform android --clean --no-install
 
-      - name: Fix node_modules resolution for Gradle
+      - name: Accept SDK licenses & setup NDK
         run: |
-          ln -sf $GITHUB_WORKSPACE/node_modules $GITHUB_WORKSPACE/android/node_modules || true
-          echo "NODE_PATH=$GITHUB_WORKSPACE/node_modules" >> $GITHUB_ENV
-          echo "NODE_BINARY=$(which node)" >> $GITHUB_ENV
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" >/dev/null 2>&1
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> $GITHUB_ENV
 
       - name: Configure Gradle
         run: |
@@ -50,12 +50,6 @@ jobs:
           printf 'org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8\n' >> ~/.gradle/gradle.properties
           printf 'org.gradle.daemon=false\n' >> ~/.gradle/gradle.properties
           printf 'org.gradle.parallel=false\n' >> ~/.gradle/gradle.properties
-
-      - name: Accept SDK licenses & setup NDK
-        run: |
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.1.12297006" >/dev/null 2>&1
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.1.12297006" >> $GITHUB_ENV
 
       - name: Decode keystore
         env:
@@ -78,10 +72,8 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-          NODE_PATH: ${{ env.NODE_PATH }}
-          NODE_BINARY: ${{ env.NODE_BINARY }}
         run: |
-          ./gradlew assembleRelease --no-daemon \
+          ./gradlew assembleRelease --no-daemon --stacktrace \
             -Pandroid.ndkVersion=27.1.12297006 \
             -Pandroid.injected.signing.store.file=$(pwd)/app/release.keystore \
             -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
@@ -95,10 +87,8 @@ jobs:
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-          NODE_PATH: ${{ env.NODE_PATH }}
-          NODE_BINARY: ${{ env.NODE_BINARY }}
         run: |
-          ./gradlew assembleDebug --no-daemon \
+          ./gradlew assembleDebug --no-daemon --stacktrace \
             -Pandroid.ndkVersion=27.1.12297006 \
             2>&1 | tee /tmp/gradle.log
           find app/build/outputs/apk -name "*.apk" || true

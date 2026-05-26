@@ -2,7 +2,7 @@ import { BlurView } from "expo-blur";
 import { Tabs } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import React from "react";
-import { Platform, StyleSheet, View, useColorScheme } from "react-native";
+import { Platform, StyleSheet, useColorScheme } from "react-native";
 
 import { useColors } from "@/hooks/useColors";
 
@@ -31,7 +31,7 @@ export default function TabLayout() {
           isIOS ? (
             <BlurView
               intensity={100}
-              tint={isDark ? "dark" : "systemUltraThinMaterialDark"}
+              tint={isDark ? "dark" : "light"}
               style={StyleSheet.absoluteFill}
             />
           ) : null,

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useId } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import Svg, { Circle, Defs, LinearGradient, Stop } from "react-native-svg";
 import { useColors } from "@/hooks/useColors";
@@ -25,6 +25,10 @@ export function GaugeCircle({
   size = 160,
 }: GaugeCircleProps) {
   const colors = useColors();
+  // useId garantees unique ID across multiple instances
+  const uid = useId().replace(/:/g, "");
+  const gradId = `grad-${uid}`;
+
   const radius = (size - 20) / 2;
   const circumference = 2 * Math.PI * radius;
   const pct = Math.max(0, Math.min(1, (value - min) / (max - min)));
@@ -40,36 +44,27 @@ export function GaugeCircle({
     <View style={[styles.container, { width: size, height: size }]}>
       <Svg width={size} height={size} style={StyleSheet.absoluteFill}>
         <Defs>
-          <LinearGradient id={`grad-${label}`} x1="0" y1="0" x2="1" y2="1">
+          <LinearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
             <Stop offset="0%" stopColor={color} stopOpacity="1" />
             <Stop offset="100%" stopColor={color} stopOpacity="0.6" />
           </LinearGradient>
         </Defs>
+        {/* Track */}
         <Circle
-          cx={cx}
-          cy={cy}
-          r={radius}
-          stroke={colors.muted}
-          strokeWidth={10}
-          fill="none"
+          cx={cx} cy={cy} r={radius}
+          stroke={colors.muted} strokeWidth={10} fill="none"
           strokeDasharray={`${circumference * 0.75} ${circumference * 0.25}`}
-          strokeDashoffset={0}
           strokeLinecap="round"
-          rotation={startAngle}
-          origin={`${cx},${cy}`}
+          rotation={startAngle} origin={`${cx},${cy}`}
         />
+        {/* Value arc */}
         <Circle
-          cx={cx}
-          cy={cy}
-          r={radius}
-          stroke={`url(#grad-${label})`}
-          strokeWidth={10}
-          fill="none"
+          cx={cx} cy={cy} r={radius}
+          stroke={`url(#${gradId})`} strokeWidth={10} fill="none"
           strokeDasharray={`${circumference * 0.75} ${circumference * 0.25}`}
           strokeDashoffset={dashOffset}
           strokeLinecap="round"
-          rotation={startAngle}
-          origin={`${cx},${cy}`}
+          rotation={startAngle} origin={`${cx},${cy}`}
         />
       </Svg>
       <View style={styles.content}>
@@ -85,33 +80,10 @@ export function GaugeCircle({
 }
 
 const styles = StyleSheet.create({
-  container: {
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  content: {
-    alignItems: "center",
-  },
-  value: {
-    fontSize: 28,
-    fontWeight: "700",
-    fontFamily: "Inter_700Bold",
-    letterSpacing: -0.5,
-  },
-  unit: {
-    fontSize: 12,
-    fontFamily: "Inter_500Medium",
-    marginTop: -2,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginTop: 4,
-  },
-  label: {
-    fontSize: 11,
-    fontFamily: "Inter_400Regular",
-    marginTop: 2,
-  },
+  container: { alignItems: "center", justifyContent: "center" },
+  content: { alignItems: "center" },
+  value: { fontSize: 28, fontFamily: "Inter_700Bold", letterSpacing: -0.5 },
+  unit: { fontSize: 12, fontFamily: "Inter_500Medium", marginTop: -2 },
+  dot: { width: 6, height: 6, borderRadius: 3, marginTop: 4 },
+  label: { fontSize: 11, fontFamily: "Inter_400Regular", marginTop: 2 },
 });

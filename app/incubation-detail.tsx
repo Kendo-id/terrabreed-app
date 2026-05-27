@@ -1,11 +1,13 @@
 import React, { useState } from "react";
 import {
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
@@ -13,19 +15,24 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
+import Svg, { Circle } from "react-native-svg";
 
 import { useColors } from "@/hooks/useColors";
 import { useIncubator } from "@/context/IncubatorContext";
-import { API } from "@/constants/api";
+import { API, apiFetch } from "@/constants/api";
 
 const SPECIES_INFO: Record<string, { days: number; emoji: string; tempRange: string; humidRange: string }> = {
-  ayam: { days: 21, emoji: "🐔", tempRange: "37.5–38°C", humidRange: "55–65%" },
-  bebek: { days: 28, emoji: "🦆", tempRange: "37.5–38°C", humidRange: "60–70%" },
-  puyuh: { days: 17, emoji: "🪺", tempRange: "37.5–38°C", humidRange: "50–60%" },
-  angsa: { days: 30, emoji: "🪿", tempRange: "37.5–38°C", humidRange: "55–65%" },
+  ayam:   { days: 21, emoji: "🐔", tempRange: "37.5–38°C", humidRange: "55–65%" },
+  bebek:  { days: 28, emoji: "🦆", tempRange: "37.5–38°C", humidRange: "60–70%" },
+  puyuh:  { days: 17, emoji: "🪺", tempRange: "37.5–38°C", humidRange: "50–60%" },
+  angsa:  { days: 30, emoji: "🪿", tempRange: "37.5–38°C", humidRange: "55–65%" },
   kalkun: { days: 28, emoji: "🦃", tempRange: "37.5–38°C", humidRange: "55–65%" },
 };
 
+/**
+ * ProgressRing menggunakan SVG strokeDashoffset — arc benar sesuai progress.
+ * Fix dari versi lama yang hanya pakai border View.
+ */
 function ProgressRing({
   progress,
   size,
@@ -37,53 +44,38 @@ function ProgressRing({
   color: string;
   bgColor: string;
 }) {
-  const r = (size - 10) / 2;
-  const circ = 2 * Math.PI * r;
-  const dash = circ * Math.min(1, Math.max(0, progress));
-  const gap = circ - dash;
+  const strokeWidth = 8;
+  const radius = (size - strokeWidth * 2) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const clampedProgress = Math.min(1, Math.max(0, progress));
+  // Arc dimulai dari atas (rotate -90deg)
+  const dashOffset = circumference * (1 - clampedProgress);
   const cx = size / 2;
   const cy = size / 2;
 
   return (
-    <View style={{ width: size, height: size }}>
-      <View
-        style={{
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          borderWidth: 5,
-          borderColor: bgColor,
-          position: "absolute",
-        }}
-      />
-      <View
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          width: size,
-          height: size,
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <Text
-          style={{
-            fontSize: 20,
-            fontFamily: "Inter_700Bold",
-            color,
-          }}
-        >
-          {Math.round(progress * 100)}%
+    <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+      <Svg width={size} height={size} style={{ position: "absolute" }}>
+        {/* Track */}
+        <Circle
+          cx={cx} cy={cy} r={radius}
+          stroke={bgColor} strokeWidth={strokeWidth} fill="none"
+        />
+        {/* Progress arc */}
+        <Circle
+          cx={cx} cy={cy} r={radius}
+          stroke={color} strokeWidth={strokeWidth} fill="none"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          rotation={-90} origin={`${cx},${cy}`}
+        />
+      </Svg>
+      <View style={{ alignItems: "center" }}>
+        <Text style={{ fontSize: 20, fontFamily: "Inter_700Bold", color }}>
+          {Math.round(clampedProgress * 100)}%
         </Text>
-        <Text
-          style={{
-            fontSize: 10,
-            fontFamily: "Inter_400Regular",
-            color,
-            opacity: 0.7,
-          }}
-        >
+        <Text style={{ fontSize: 10, fontFamily: "Inter_400Regular", color, opacity: 0.7 }}>
           selesai
         </Text>
       </View>
@@ -94,7 +86,10 @@ function ProgressRing({
 export default function IncubationDetailScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { incubation, sendCommand } = useIncubator();
+  const { incubation, refreshNow } = useIncubator();
+  const [finishModalVisible, setFinishModalVisible] = useState(false);
+  const [hatchedInput, setHatchedInput] = useState("0");
+  const [infertileInput, setInfertileInput] = useState("0");
   const [finishing, setFinishing] = useState(false);
   const topPad = Platform.OS === "web" ? 67 : insets.top;
 
@@ -104,45 +99,51 @@ export default function IncubationDetailScreen() {
       ? Math.min(1, incubation.elapsed_days / incubation.total_days)
       : 0;
 
-  const daysLeft = incubation.total_days && incubation.elapsed_days
-    ? Math.max(0, incubation.total_days - incubation.elapsed_days)
-    : null;
+  const daysLeft =
+    incubation.total_days && incubation.elapsed_days !== undefined
+      ? Math.max(0, incubation.total_days - incubation.elapsed_days)
+      : null;
 
   const startedDate = incubation.started_at
     ? new Date(incubation.started_at * 1000).toLocaleDateString("id-ID", {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
+        day: "numeric", month: "long", year: "numeric",
       })
     : null;
 
-  const expectedHatch = incubation.started_at && incubation.total_days
-    ? new Date((incubation.started_at + incubation.total_days * 86400) * 1000).toLocaleDateString(
-        "id-ID",
-        { day: "numeric", month: "long", year: "numeric" }
-      )
-    : null;
+  const expectedHatch =
+    incubation.started_at && incubation.total_days
+      ? new Date((incubation.started_at + incubation.total_days * 86400) * 1000).toLocaleDateString(
+          "id-ID", { day: "numeric", month: "long", year: "numeric" }
+        )
+      : null;
 
-  const finishSession = () => {
-    Alert.alert(
-      "Selesaikan Sesi",
-      "Tandai sesi inkubasi ini sebagai selesai?",
-      [
-        { text: "Batal", style: "cancel" },
-        {
-          text: "Selesaikan",
-          onPress: async () => {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-            setFinishing(true);
-            try {
-              await fetch(API.incubationFinish, { method: "POST" });
-            } catch {}
-            setFinishing(false);
-            router.back();
-          },
-        },
-      ]
-    );
+  const confirmFinish = async () => {
+    if (!incubation.id) return;
+    setFinishing(true);
+    try {
+      await apiFetch(API.incubationFinish, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id:        incubation.id,
+          hatched:   parseInt(hatchedInput)   || 0,
+          infertile: parseInt(infertileInput) || 0,
+          notes:     "",
+        }),
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setFinishModalVisible(false);
+      refreshNow();
+      Alert.alert(
+        "Sesi Selesai",
+        `Menetas: ${hatchedInput} | Infertil: ${infertileInput}`,
+        [{ text: "OK", onPress: () => router.back() }]
+      );
+    } catch {
+      Alert.alert("Error", "Gagal menyimpan hasil inkubasi.");
+    } finally {
+      setFinishing(false);
+    }
   };
 
   if (!incubation.active) {
@@ -155,12 +156,10 @@ export default function IncubationDetailScreen() {
           <Text style={[styles.title, { color: colors.foreground }]}>Sesi Inkubasi</Text>
         </View>
         <View style={styles.emptyCenter}>
-          <View style={[styles.emptyIcon, { backgroundColor: colors.muted }]}>
-            <Feather name="inbox" size={32} color={colors.mutedForeground} />
-          </View>
+          <Feather name="inbox" size={40} color={colors.mutedForeground} />
           <Text style={[styles.emptyText, { color: colors.foreground }]}>Tidak ada sesi aktif</Text>
           <Text style={[styles.emptyDesc, { color: colors.mutedForeground }]}>
-            Mulai sesi baru melalui TERRA AI atau menu pengaturan.
+            Mulai sesi baru melalui TERRA AI atau Pengaturan.
           </Text>
         </View>
       </View>
@@ -169,6 +168,48 @@ export default function IncubationDetailScreen() {
 
   return (
     <View style={[styles.root, { backgroundColor: colors.background }]}>
+      {/* Finish Modal */}
+      <Modal visible={finishModalVisible} transparent animationType="fade" onRequestClose={() => setFinishModalVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalBox, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.modalTitle, { color: colors.foreground }]}>Selesaikan Sesi</Text>
+            <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+              Masukkan hasil akhir penetasan.
+            </Text>
+            {[
+              { label: "Telur menetas", val: hatchedInput, set: setHatchedInput },
+              { label: "Telur infertil", val: infertileInput, set: setInfertileInput },
+            ].map((f) => (
+              <View key={f.label} style={[styles.modalInput, { backgroundColor: colors.muted, borderColor: colors.border }]}>
+                <Text style={[styles.modalInputLabel, { color: colors.mutedForeground }]}>{f.label}</Text>
+                <TextInput
+                  value={f.val}
+                  onChangeText={f.set}
+                  keyboardType="numeric"
+                  style={[styles.modalInputField, { color: colors.foreground }]}
+                  selectTextOnFocus
+                />
+              </View>
+            ))}
+            <View style={styles.modalBtns}>
+              <Pressable
+                onPress={() => setFinishModalVisible(false)}
+                style={[styles.modalBtn, { backgroundColor: colors.muted, borderColor: colors.border }]}
+              >
+                <Text style={[styles.modalBtnText, { color: colors.mutedForeground }]}>Batal</Text>
+              </Pressable>
+              <Pressable
+                onPress={confirmFinish}
+                disabled={finishing}
+                style={[styles.modalBtn, { backgroundColor: colors.accent, borderColor: colors.accent }]}
+              >
+                <Text style={[styles.modalBtnText, { color: "#fff" }]}>{finishing ? "..." : "Simpan"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <LinearGradient
         colors={[colors.card, colors.background]}
         style={[styles.header, { paddingTop: topPad + 12, borderBottomColor: colors.border }]}
@@ -181,7 +222,7 @@ export default function IncubationDetailScreen() {
             {info?.emoji ?? "🥚"} Sesi Inkubasi
           </Text>
           <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
-            {incubation.species?.charAt(0).toUpperCase()}{incubation.species?.slice(1)} · {incubation.total_eggs} telur
+            {incubation.species?.charAt(0).toUpperCase()}{incubation.species?.slice(1)} · {incubation.total_eggs ?? 0} telur
           </Text>
         </View>
         <View style={[styles.activeBadge, { backgroundColor: colors.accent + "22", borderColor: colors.accent }]}>
@@ -190,58 +231,37 @@ export default function IncubationDetailScreen() {
         </View>
       </LinearGradient>
 
-      <ScrollView
-        contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 24 }]}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Progress Section */}
+      <ScrollView contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 24 }]} showsVerticalScrollIndicator={false}>
+        {/* Progress */}
         <View style={[styles.progressCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.progressRow}>
-            <ProgressRing
-              progress={progress}
-              size={100}
-              color={colors.primary}
-              bgColor={colors.primary + "22"}
-            />
+            <ProgressRing progress={progress} size={100} color={colors.primary} bgColor={colors.primary + "22"} />
             <View style={styles.progressInfo}>
               <View style={styles.progressStat}>
-                <Text style={[styles.progressStatValue, { color: colors.foreground }]}>
-                  Hari {incubation.elapsed_days}
-                </Text>
-                <Text style={[styles.progressStatLabel, { color: colors.mutedForeground }]}>
-                  dari {incubation.total_days} hari
-                </Text>
+                <Text style={[styles.progressStatValue, { color: colors.foreground }]}>Hari {incubation.elapsed_days}</Text>
+                <Text style={[styles.progressStatLabel, { color: colors.mutedForeground }]}>dari {incubation.total_days} hari</Text>
               </View>
               <View style={[styles.dividerH, { backgroundColor: colors.border }]} />
               <View style={styles.progressStat}>
                 <Text style={[styles.progressStatValue, { color: daysLeft === 0 ? colors.accent : colors.foreground }]}>
                   {daysLeft === 0 ? "Siap menetas!" : `${daysLeft} hari lagi`}
                 </Text>
-                <Text style={[styles.progressStatLabel, { color: colors.mutedForeground }]}>
-                  perkiraan menetas
-                </Text>
+                <Text style={[styles.progressStatLabel, { color: colors.mutedForeground }]}>perkiraan menetas</Text>
               </View>
             </View>
           </View>
-
           <View style={[styles.progressBarOuter, { backgroundColor: colors.primary + "22" }]}>
-            <View
-              style={[
-                styles.progressBarInner,
-                { backgroundColor: colors.primary, width: `${progress * 100}%` as `${number}%` },
-              ]}
-            />
+            <View style={[styles.progressBarInner, { backgroundColor: colors.primary, width: `${progress * 100}%` as `${number}%` }]} />
           </View>
         </View>
 
-        {/* Details */}
+        {/* Detail */}
         <View style={[styles.detailCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>DETAIL SESI</Text>
-
           {[
             { icon: "calendar", label: "Mulai Inkubasi", value: startedDate || "--" },
             { icon: "clock", label: "Perkiraan Menetas", value: expectedHatch || "--" },
-            { icon: "package", label: "Jumlah Telur", value: `${incubation.total_eggs} butir` },
+            { icon: "package", label: "Jumlah Telur", value: `${incubation.total_eggs ?? 0} butir` },
             { icon: "tag", label: "Spesies", value: `${info?.emoji ?? ""} ${incubation.species?.charAt(0).toUpperCase()}${incubation.species?.slice(1) || "--"}` },
             ...(incubation.notes ? [{ icon: "file-text", label: "Catatan", value: incubation.notes }] : []),
           ].map((row, i, arr) => (
@@ -258,10 +278,12 @@ export default function IncubationDetailScreen() {
           ))}
         </View>
 
-        {/* Species Info */}
+        {/* Species guide */}
         {info && (
           <View style={[styles.speciesCard, { backgroundColor: colors.primary + "12", borderColor: colors.primary + "30" }]}>
-            <Text style={[styles.sectionLabel, { color: colors.primary + "99" }]}>PANDUAN INKUBASI {incubation.species?.toUpperCase()}</Text>
+            <Text style={[styles.sectionLabel, { color: colors.primary + "99" }]}>
+              PANDUAN {incubation.species?.toUpperCase()}
+            </Text>
             <View style={styles.speciesGrid}>
               {[
                 { icon: "thermometer", label: "Suhu Ideal", value: info.tempRange },
@@ -292,9 +314,7 @@ export default function IncubationDetailScreen() {
                   {passed && <Feather name="check" size={10} color="#fff" />}
                 </View>
                 <View style={styles.milestoneInfo}>
-                  <Text style={[styles.milestoneDay, { color: passed ? colors.accent : colors.mutedForeground }]}>
-                    Hari {m.day}
-                  </Text>
+                  <Text style={[styles.milestoneDay, { color: passed ? colors.accent : colors.mutedForeground }]}>Hari {m.day}</Text>
                   <Text style={[styles.milestoneDesc, { color: colors.foreground }]}>{m.label}</Text>
                 </View>
               </View>
@@ -302,20 +322,17 @@ export default function IncubationDetailScreen() {
           })}
         </View>
 
-        {/* Finish Button */}
+        {/* Finish button */}
         <Pressable
-          onPress={finishSession}
-          disabled={finishing}
+          onPress={() => { setHatchedInput("0"); setInfertileInput("0"); setFinishModalVisible(true); }}
           style={({ pressed }) => [styles.finishBtn, {
             backgroundColor: colors.accent + "18",
             borderColor: colors.accent,
-            opacity: pressed || finishing ? 0.7 : 1,
+            opacity: pressed ? 0.7 : 1,
           }]}
         >
           <Feather name="check-circle" size={20} color={colors.accent} />
-          <Text style={[styles.finishBtnText, { color: colors.accent }]}>
-            {finishing ? "Menyimpan..." : "Selesaikan Sesi Inkubasi"}
-          </Text>
+          <Text style={[styles.finishBtnText, { color: colors.accent }]}>Selesaikan Sesi Inkubasi</Text>
         </Pressable>
       </ScrollView>
     </View>
@@ -323,14 +340,14 @@ export default function IncubationDetailScreen() {
 }
 
 function getMilestones(species: string, totalDays: number) {
-  const ratio = totalDays / 21;
+  const r = totalDays / 21;
   return [
-    { day: 1, label: "Inkubasi dimulai" },
-    { day: Math.round(3 * ratio), label: "Embrio mulai berkembang" },
-    { day: Math.round(7 * ratio), label: "Detak jantung terdeteksi" },
-    { day: Math.round(14 * ratio), label: "Bulu mulai tumbuh" },
-    { day: Math.round(18 * ratio), label: "Stop balik telur, naikkan kelembaban" },
-    { day: totalDays, label: "Perkiraan menetas 🐣" },
+    { day: 1,                    label: "Inkubasi dimulai" },
+    { day: Math.round(3 * r),    label: "Embrio mulai berkembang" },
+    { day: Math.round(7 * r),    label: "Detak jantung terdeteksi" },
+    { day: Math.round(14 * r),   label: "Bulu mulai tumbuh" },
+    { day: Math.round(18 * r),   label: "Stop balik telur, naikkan kelembaban" },
+    { day: totalDays,            label: "Perkiraan menetas 🐣" },
   ];
 }
 
@@ -345,7 +362,6 @@ const styles = StyleSheet.create({
   activeText: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
   scroll: { padding: 16, gap: 12 },
   emptyCenter: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 32 },
-  emptyIcon: { width: 64, height: 64, borderRadius: 20, alignItems: "center", justifyContent: "center" },
   emptyText: { fontSize: 18, fontFamily: "Inter_700Bold" },
   emptyDesc: { fontSize: 13, fontFamily: "Inter_400Regular", textAlign: "center" },
   progressCard: { borderRadius: 16, borderWidth: 1, padding: 16, gap: 14 },
@@ -357,7 +373,7 @@ const styles = StyleSheet.create({
   dividerH: { height: 1 },
   progressBarOuter: { height: 8, borderRadius: 4, overflow: "hidden" },
   progressBarInner: { height: 8, borderRadius: 4 },
-  detailCard: { borderRadius: 16, borderWidth: 1, padding: 16, gap: 0 },
+  detailCard: { borderRadius: 16, borderWidth: 1, padding: 16 },
   sectionLabel: { fontSize: 10, fontFamily: "Inter_600SemiBold", letterSpacing: 1, marginBottom: 12 },
   detailRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10 },
   detailIcon: { width: 28, height: 28, borderRadius: 8, alignItems: "center", justifyContent: "center" },
@@ -377,4 +393,14 @@ const styles = StyleSheet.create({
   milestoneDesc: { fontSize: 13, fontFamily: "Inter_400Regular" },
   finishBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10, padding: 16, borderRadius: 16, borderWidth: 1.5 },
   finishBtnText: { fontSize: 15, fontFamily: "Inter_600SemiBold" },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 24 },
+  modalBox: { width: "100%", borderRadius: 20, borderWidth: 1, padding: 24, gap: 14 },
+  modalTitle: { fontSize: 18, fontFamily: "Inter_700Bold" },
+  modalSub: { fontSize: 13, fontFamily: "Inter_400Regular" },
+  modalInput: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, borderRadius: 12, borderWidth: 1 },
+  modalInputLabel: { fontSize: 13, fontFamily: "Inter_500Medium" },
+  modalInputField: { fontSize: 20, fontFamily: "Inter_700Bold", minWidth: 60, textAlign: "right" },
+  modalBtns: { flexDirection: "row", gap: 10 },
+  modalBtn: { flex: 1, padding: 14, borderRadius: 12, borderWidth: 1, alignItems: "center" },
+  modalBtnText: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
 });

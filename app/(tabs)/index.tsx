@@ -170,7 +170,7 @@ export default function DashboardScreen() {
           >
             <Feather name="clock" size={13} color={colors.primary} />
             <Text style={[styles.incubationText, { color: colors.primary }]}>
-              {incubation.species?.charAt(0).toUpperCase()}{incubation.species?.slice(1)} · Hari ke-{incubation.elapsed_days}/{incubation.total_days} · {incubation.total_eggs} telur
+              {incubation.species?.charAt(0).toUpperCase()}{incubation.species?.slice(1)} · Hari ke-{incubation.elapsed_days}/{incubation.total_days} · {incubation.total_eggs ?? 0} telur
             </Text>
             <View style={[styles.progressBarOuter, { backgroundColor: colors.primary + "30" }]}>
               <View style={[styles.progressBarInner, { backgroundColor: colors.primary, width: `${incubationProgress * 100}%` as `${number}%` }]} />

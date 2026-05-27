@@ -11,13 +11,13 @@ import {
   View,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Audio } from "expo-av";
 import * as Haptics from "expo-haptics";
+import * as FileSystem from "expo-file-system";
 
 import { useColors } from "@/hooks/useColors";
-import { API } from "@/constants/api";
+import { API, apiFetch } from "@/constants/api";
 
 interface Message {
   id: string;
@@ -40,10 +40,17 @@ export default function AIScreen() {
   const soundRef = useRef<Audio.Sound | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const waveAnim = useRef(new Animated.Value(0)).current;
   const micPressAnim = useRef(new Animated.Value(1)).current;
   const topPad = Platform.OS === "web" ? 67 : insets.top;
 
+  // Cleanup sound on unmount — fix memory leak
+  useEffect(() => {
+    return () => {
+      soundRef.current?.unloadAsync().catch(() => {});
+    };
+  }, []);
+
+  // Pulse animation when recording
   useEffect(() => {
     if (voiceState === "recording") {
       Animated.loop(
@@ -52,14 +59,9 @@ export default function AIScreen() {
           Animated.timing(pulseAnim, { toValue: 1, duration: 500, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
         ])
       ).start();
-      Animated.loop(
-        Animated.timing(waveAnim, { toValue: 1, duration: 1200, useNativeDriver: false })
-      ).start();
     } else {
       pulseAnim.stopAnimation();
       pulseAnim.setValue(1);
-      waveAnim.stopAnimation();
-      waveAnim.setValue(0);
     }
   }, [voiceState]);
 
@@ -75,29 +77,64 @@ export default function AIScreen() {
     return msg;
   }, []);
 
+  /**
+   * TTS: server /api/tts mengembalikan binary audio/mpeg langsung (bukan JSON).
+   * Simpan ke file sementara lalu mainkan dengan expo-av.
+   */
   const playTTS = async (text: string) => {
     try {
       setVoiceState("playing");
-      const res = await fetch(API.tts, {
+
+      // Unload audio sebelumnya
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
+
+      const res = await apiFetch(API.tts, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, voice: "id-ID-GadisNeural" }),
+        timeoutMs: 30000,
       });
-      if (!res.ok) throw new Error("TTS failed");
-      const data = await res.json();
-      if (data.url) {
-        const { sound } = await Audio.Sound.createAsync({ uri: data.url });
-        soundRef.current = sound;
-        await sound.playAsync();
-        sound.setOnPlaybackStatusUpdate((s) => {
-          if (s.isLoaded && s.didJustFinish) {
-            setVoiceState("idle");
-          }
-        });
-      } else {
-        setVoiceState("idle");
+
+      if (!res.ok) throw new Error("TTS HTTP " + res.status);
+
+      // Server returns raw audio/mpeg binary — baca sebagai ArrayBuffer
+      const arrayBuffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
       }
-    } catch {
+      const b64 = btoa(binary);
+
+      // Tulis ke file sementara agar expo-av bisa mainkan
+      const tmpUri = FileSystem.cacheDirectory + "terra_tts_" + Date.now() + ".mp3";
+      await FileSystem.writeAsStringAsync(tmpUri, b64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+      });
+
+      const { sound } = await Audio.Sound.createAsync({ uri: tmpUri });
+      soundRef.current = sound;
+      await sound.playAsync();
+
+      sound.setOnPlaybackStatusUpdate((s) => {
+        if (s.isLoaded && s.didJustFinish) {
+          setVoiceState("idle");
+          sound.unloadAsync().catch(() => {});
+          soundRef.current = null;
+          FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+        }
+      });
+    } catch (e) {
+      console.warn("[TTS Error]", e);
       setVoiceState("idle");
     }
   };
@@ -107,19 +144,23 @@ export default function AIScreen() {
     addMessage("user", text);
     setInputText("");
     try {
-      const res = await fetch(API.chat, {
+      const res = await apiFetch(API.chat, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text }),
       });
+      if (!res.ok) throw new Error("HTTP " + res.status);
       const data = await res.json();
       const reply = data.reply || "Tidak ada respons.";
       addMessage("assistant", reply);
       if (isCallMode) {
         await playTTS(reply);
       }
-    } catch {
-      addMessage("assistant", "Maaf, gagal terhubung ke TERRA.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error && e.name === "AbortError"
+        ? "Koneksi timeout. Pastikan terhubung ke jaringan lokal."
+        : "Gagal terhubung ke TERRA. Cek koneksi ke kendo-assistant.com.";
+      addMessage("assistant", msg);
     }
   };
 
@@ -156,7 +197,7 @@ export default function AIScreen() {
       formData.append("audio", { uri, name: "recording.m4a", type: "audio/m4a" } as unknown as Blob);
       formData.append("lang", "id");
 
-      const sttRes = await fetch(API.stt, { method: "POST", body: formData });
+      const sttRes = await apiFetch(API.stt, { method: "POST", body: formData });
       const sttData = await sttRes.json();
       const transcript = sttData.text || "";
       setCallTranscript(transcript);
@@ -172,15 +213,21 @@ export default function AIScreen() {
 
   const toggleCall = () => {
     setIsCallMode((v) => {
-      if (!v) {
+      const next = !v;
+      if (next) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        addMessage("assistant", "Halo! Saya TERRA, asisten inkubator Anda. Tekan dan tahan tombol mikrofon untuk berbicara dengan saya.");
+        addMessage("assistant", "Halo! Saya TERRA, asisten inkubator Anda. Tekan dan tahan tombol mikrofon untuk berbicara.");
       } else {
-        if (recordingRef.current) {
-          stopRecordingAndSend();
+        // Stop recording jika masih aktif
+        if (recordingRef.current && voiceState === "recording") {
+          recordingRef.current.stopAndUnloadAsync().catch(() => {});
+          recordingRef.current = null;
+          setVoiceState("idle");
         }
+        // Stop playback
+        soundRef.current?.stopAsync().catch(() => {});
       }
-      return !v;
+      return next;
     });
   };
 
@@ -197,15 +244,8 @@ export default function AIScreen() {
     }
   };
 
-  const voiceButtonAction = () => {
-    if (voiceState === "idle") {
-      startRecording();
-    } else if (voiceState === "recording") {
-      stopRecordingAndSend();
-    }
-  };
-
-  const recordingColor = voiceState === "recording" ? colors.destructive :
+  const recordingColor =
+    voiceState === "recording" ? colors.destructive :
     voiceState === "processing" ? colors.warning :
     voiceState === "playing" ? colors.accent : colors.primary;
 
@@ -236,19 +276,14 @@ export default function AIScreen() {
         </Pressable>
       </View>
 
-      {/* Call Mode Overlay */}
+      {/* Call Mode Panel */}
       {isCallMode && (
         <View style={[styles.callPanel, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
-          <Animated.View
-            style={[
-              styles.callAvatarLarge,
-              {
-                backgroundColor: recordingColor + "18",
-                borderColor: recordingColor,
-                transform: [{ scale: pulseAnim }],
-              },
-            ]}
-          >
+          <Animated.View style={[styles.callAvatarLarge, {
+            backgroundColor: recordingColor + "18",
+            borderColor: recordingColor,
+            transform: [{ scale: pulseAnim }],
+          }]}>
             <Text style={[styles.callAvatarText, { color: recordingColor }]}>T</Text>
           </Animated.View>
 
@@ -260,35 +295,23 @@ export default function AIScreen() {
             </Text>
             {callTranscript ? (
               <Text style={[styles.callTranscript, { color: colors.mutedForeground }]} numberOfLines={1}>
-                "{callTranscript}"
+                &quot;{callTranscript}&quot;
               </Text>
             ) : null}
           </View>
 
-          {/* Push-to-talk button */}
           <Animated.View style={{ transform: [{ scale: micPressAnim }] }}>
             <Pressable
               onPressIn={handleMicPressIn}
               onPressOut={handleMicPressOut}
               disabled={voiceState === "processing" || voiceState === "playing"}
-              style={[
-                styles.pttBtn,
-                {
-                  backgroundColor: voiceState === "recording" ? colors.destructive : colors.primary,
-                  opacity: (voiceState === "processing" || voiceState === "playing") ? 0.5 : 1,
-                  shadowColor: voiceState === "recording" ? colors.destructive : colors.primary,
-                  shadowOpacity: voiceState === "recording" ? 0.6 : 0.3,
-                  shadowRadius: voiceState === "recording" ? 16 : 8,
-                  shadowOffset: { width: 0, height: 4 },
-                  elevation: voiceState === "recording" ? 12 : 4,
-                },
-              ]}
+              style={[styles.pttBtn, {
+                backgroundColor: voiceState === "recording" ? colors.destructive : colors.primary,
+                opacity: (voiceState === "processing" || voiceState === "playing") ? 0.5 : 1,
+                elevation: voiceState === "recording" ? 12 : 4,
+              }]}
             >
-              <Feather
-                name={voiceState === "recording" ? "mic" : "mic"}
-                size={32}
-                color="#fff"
-              />
+              <Feather name="mic" size={32} color="#fff" />
             </Pressable>
           </Animated.View>
           <Text style={[styles.pttHint, { color: colors.mutedForeground }]}>
@@ -312,7 +335,7 @@ export default function AIScreen() {
             </View>
             <Text style={[styles.emptyTitle, { color: colors.foreground }]}>Tanya TERRA</Text>
             <Text style={[styles.emptyDesc, { color: colors.mutedForeground }]}>
-              Tanya kondisi mesin, minta kontrol perangkat, atau buat sesi inkubasi baru. Aktifkan Voice Call untuk berbicara langsung.
+              Tanya kondisi mesin, minta kontrol perangkat, atau buat sesi inkubasi baru.
             </Text>
             {[
               "Suhu mesin sekarang berapa?",
@@ -344,17 +367,14 @@ export default function AIScreen() {
             {msg.role === "assistant" && (
               <Text style={[styles.bubbleName, { color: colors.primary }]}>TERRA</Text>
             )}
-            <Text style={[
-              styles.bubbleText,
-              { color: msg.role === "user" ? "#fff" : colors.foreground },
-            ]}>
+            <Text style={[styles.bubbleText, { color: msg.role === "user" ? "#fff" : colors.foreground }]}>
               {msg.content}
             </Text>
           </View>
         ))}
       </ScrollView>
 
-      {/* Text Input (hidden in call mode) */}
+      {/* Text Input — hidden in call mode */}
       {!isCallMode && (
         <View style={[styles.inputBar, {
           backgroundColor: colors.card,
@@ -412,7 +432,7 @@ const styles = StyleSheet.create({
   headerSub: { fontSize: 11, fontFamily: "Inter_500Medium" },
   callToggle: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, borderWidth: 1 },
   callToggleText: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
-  callPanel: { alignItems: "center", padding: 20, gap: 8, borderBottomWidth: 1, flexDirection: "column" },
+  callPanel: { alignItems: "center", padding: 20, gap: 8, borderBottomWidth: 1 },
   callAvatarLarge: { width: 72, height: 72, borderRadius: 22, alignItems: "center", justifyContent: "center", borderWidth: 2 },
   callAvatarText: { fontSize: 36, fontFamily: "Inter_700Bold" },
   callInfo: { alignItems: "center", gap: 2 },

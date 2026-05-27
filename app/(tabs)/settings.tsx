@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -17,7 +18,7 @@ import * as Notifications from "expo-notifications";
 
 import { useColors } from "@/hooks/useColors";
 import { useIncubator } from "@/context/IncubatorContext";
-import { API } from "@/constants/api";
+import { API, apiFetch } from "@/constants/api";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -41,8 +42,11 @@ const SPECIES_PRESETS: Record<SpeciesKey, { temp: number; humid: number; days: n
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { sensor, status, incubation, sendCommand, refreshNow } = useIncubator();
+  const { sensor, status, incubation, refreshNow } = useIncubator();
   const topPad = Platform.OS === "web" ? 67 : insets.top;
+
+  // isDirty: true saat user sedang edit — cegah useEffect reset input
+  const isDirty = useRef(false);
 
   const [targetTemp, setTargetTemp] = useState(String(sensor.target_temp));
   const [targetHumid, setTargetHumid] = useState(String(sensor.target_humid));
@@ -57,31 +61,68 @@ export default function SettingsScreen() {
   const [sessionNotes, setSessionNotes] = useState("");
   const [startingSession, setStartingSession] = useState(false);
 
+  // Modal untuk finish incubation (ganti Alert.prompt yang crash di Android)
+  const [finishModalVisible, setFinishModalVisible] = useState(false);
+  const [hatchedInput, setHatchedInput] = useState("0");
+  const [infertileInput, setInfertileInput] = useState("0");
+  const [finishing, setFinishing] = useState(false);
+
+  // Notification widget update interval
+  const notifInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Sync input dari server HANYA jika user tidak sedang mengetik
   useEffect(() => {
-    setTargetTemp(String(sensor.target_temp));
-    setTargetHumid(String(sensor.target_humid));
-    setTurnInterval(String(status.turn_interval_min));
-    setTurnDuration(String(status.turn_duration_sec));
+    if (!isDirty.current) {
+      setTargetTemp(String(sensor.target_temp));
+      setTargetHumid(String(sensor.target_humid));
+      setTurnInterval(String(status.turn_interval_min));
+      setTurnDuration(String(status.turn_duration_sec));
+    }
   }, [sensor.target_temp, sensor.target_humid, status.turn_interval_min, status.turn_duration_sec]);
+
+  // Update notifikasi widget secara periodik
+  useEffect(() => {
+    if (widgetEnabled) {
+      const updateNotif = async () => {
+        await Notifications.scheduleNotificationAsync({
+          identifier: "terrabreed-widget",
+          content: {
+            title: "TerraBreed Monitor",
+            body: `Suhu: ${sensor.temp.toFixed(1)}°C | Lembab: ${sensor.humidity.toFixed(0)}% | ${status.auto_mode ? "Auto" : "Manual"}`,
+            sticky: true,
+            data: { type: "widget" },
+          },
+          trigger: null,
+        }).catch(() => {});
+      };
+      updateNotif();
+      notifInterval.current = setInterval(updateNotif, 5000);
+    }
+    return () => {
+      if (notifInterval.current) clearInterval(notifInterval.current);
+    };
+  }, [widgetEnabled, sensor.temp, sensor.humidity, status.auto_mode]);
 
   const saveSettings = async () => {
     setSaving(true);
+    isDirty.current = false;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     try {
-      await fetch(API.settings, {
+      const res = await apiFetch(API.settings, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          target_temp: parseFloat(targetTemp),
-          target_humid: parseFloat(targetHumid),
-          turn_interval: parseInt(turnInterval),
-          turn_duration: parseInt(turnDuration),
+          target_temp:    parseFloat(targetTemp)   || sensor.target_temp,
+          target_humid:   parseFloat(targetHumid)  || sensor.target_humid,
+          turn_interval:  parseInt(turnInterval)   || status.turn_interval_min,
+          turn_duration:  parseInt(turnDuration)   || status.turn_duration_sec,
         }),
       });
+      if (!res.ok) throw new Error("HTTP " + res.status);
       refreshNow();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      Alert.alert("Error", "Gagal menyimpan pengaturan.");
+    } catch (e) {
+      Alert.alert("Error", "Gagal menyimpan pengaturan. Cek koneksi ke server.");
     } finally {
       setSaving(false);
     }
@@ -91,7 +132,7 @@ export default function SettingsScreen() {
     const preset = SPECIES_PRESETS[species];
     setStartingSession(true);
     try {
-      const res = await fetch(API.incubationStart, {
+      const res = await apiFetch(API.incubationStart, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -109,32 +150,43 @@ export default function SettingsScreen() {
         Alert.alert("Sesi Dimulai", `Inkubasi ${preset.label} (${totalEggs} telur) berhasil dibuat.`);
       }
     } catch {
-      Alert.alert("Error", "Gagal membuat sesi inkubasi.");
+      Alert.alert("Error", "Gagal membuat sesi inkubasi. Cek koneksi.");
     } finally {
       setStartingSession(false);
     }
   };
 
-  const finishIncubation = () => {
+  // Ganti Alert.prompt → custom Modal (karena Alert.prompt tidak ada di Android)
+  const openFinishModal = () => {
     if (!incubation.active) return;
-    Alert.prompt(
-      "Selesaikan Inkubasi",
-      "Berapa telur yang berhasil menetas?",
-      async (hatched) => {
-        if (!hatched) return;
-        try {
-          await fetch(API.incubationFinish, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: incubation.id, hatched: parseInt(hatched) || 0, infertile: 0 }),
-          });
-          refreshNow();
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        } catch {}
-      },
-      "plain-text",
-      "0"
-    );
+    setHatchedInput("0");
+    setInfertileInput("0");
+    setFinishModalVisible(true);
+  };
+
+  const confirmFinish = async () => {
+    if (!incubation.id) return;
+    setFinishing(true);
+    try {
+      await apiFetch(API.incubationFinish, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id:        incubation.id,
+          hatched:   parseInt(hatchedInput)   || 0,
+          infertile: parseInt(infertileInput) || 0,
+          notes:     "",
+        }),
+      });
+      setFinishModalVisible(false);
+      refreshNow();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert("Selesai", `Sesi inkubasi berhasil ditutup. Menetas: ${hatchedInput}, infertil: ${infertileInput}.`);
+    } catch {
+      Alert.alert("Error", "Gagal menutup sesi inkubasi.");
+    } finally {
+      setFinishing(false);
+    }
   };
 
   const toggleWidget = async (val: boolean) => {
@@ -146,40 +198,72 @@ export default function SettingsScreen() {
         Alert.alert("Izin Diperlukan", "Aktifkan notifikasi untuk widget suhu.");
         return;
       }
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: "TerraBreed Monitor",
-          body: `Suhu: ${sensor.temp.toFixed(1)}°C | Lembab: ${sensor.humidity.toFixed(0)}%`,
-          sticky: true,
-          data: { type: "widget" },
-        },
-        trigger: null,
-      });
     } else {
+      if (notifInterval.current) clearInterval(notifInterval.current);
+      await Notifications.cancelScheduledNotificationAsync("terrabreed-widget").catch(() => {});
       await Notifications.dismissAllNotificationsAsync();
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   };
 
-  const NumberInput = ({ label, value, onChangeText, unit }: {
-    label: string; value: string; onChangeText: (v: string) => void; unit: string;
-  }) => (
-    <View style={[styles.numInput, { borderColor: colors.border, backgroundColor: colors.card }]}>
-      <Text style={[styles.numInputLabel, { color: colors.mutedForeground }]}>{label}</Text>
-      <View style={styles.numInputRight}>
-        <TextInput
-          value={value}
-          onChangeText={onChangeText}
-          keyboardType="numeric"
-          style={[styles.numInputField, { color: colors.foreground }]}
-        />
-        <Text style={[styles.numInputUnit, { color: colors.mutedForeground }]}>{unit}</Text>
-      </View>
-    </View>
-  );
-
   return (
     <View style={[styles.root, { backgroundColor: colors.background }]}>
+      {/* Finish Modal — cross-platform, ganti Alert.prompt */}
+      <Modal
+        visible={finishModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setFinishModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalBox, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.modalTitle, { color: colors.foreground }]}>Selesaikan Inkubasi</Text>
+            <Text style={[styles.modalSub, { color: colors.mutedForeground }]}>
+              Masukkan hasil penetasan untuk catatan statistik.
+            </Text>
+
+            <View style={[styles.modalInput, { borderColor: colors.border, backgroundColor: colors.muted }]}>
+              <Text style={[styles.modalInputLabel, { color: colors.mutedForeground }]}>Telur menetas</Text>
+              <TextInput
+                value={hatchedInput}
+                onChangeText={setHatchedInput}
+                keyboardType="numeric"
+                style={[styles.modalInputField, { color: colors.foreground }]}
+                selectTextOnFocus
+              />
+            </View>
+            <View style={[styles.modalInput, { borderColor: colors.border, backgroundColor: colors.muted }]}>
+              <Text style={[styles.modalInputLabel, { color: colors.mutedForeground }]}>Telur infertil</Text>
+              <TextInput
+                value={infertileInput}
+                onChangeText={setInfertileInput}
+                keyboardType="numeric"
+                style={[styles.modalInputField, { color: colors.foreground }]}
+                selectTextOnFocus
+              />
+            </View>
+
+            <View style={styles.modalBtns}>
+              <Pressable
+                onPress={() => setFinishModalVisible(false)}
+                style={[styles.modalBtn, { backgroundColor: colors.muted, borderColor: colors.border }]}
+              >
+                <Text style={[styles.modalBtnText, { color: colors.mutedForeground }]}>Batal</Text>
+              </Pressable>
+              <Pressable
+                onPress={confirmFinish}
+                disabled={finishing}
+                style={[styles.modalBtn, { backgroundColor: colors.destructive, borderColor: colors.destructive }]}
+              >
+                <Text style={[styles.modalBtnText, { color: "#fff" }]}>
+                  {finishing ? "Menyimpan..." : "Selesaikan"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <View style={[styles.header, { paddingTop: topPad + 12, backgroundColor: colors.card, borderBottomColor: colors.border }]}>
         <Text style={[styles.title, { color: colors.foreground }]}>Pengaturan</Text>
       </View>
@@ -189,7 +273,7 @@ export default function SettingsScreen() {
         contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 90 }]}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Widget homescreen */}
+        {/* Widget */}
         <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>WIDGET HOMESCREEN</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.row}>
@@ -199,7 +283,9 @@ export default function SettingsScreen() {
             <View style={{ flex: 1 }}>
               <Text style={[styles.cardLabel, { color: colors.foreground }]}>Notifikasi Suhu Real-time</Text>
               <Text style={[styles.cardSub, { color: colors.mutedForeground }]}>
-                Tampilkan suhu & kelembaban di panel notifikasi
+                {widgetEnabled
+                  ? `${sensor.temp.toFixed(1)}°C | ${sensor.humidity.toFixed(0)}% — update tiap 5 detik`
+                  : "Tampilkan suhu & kelembaban di panel notifikasi"}
               </Text>
             </View>
             <Switch
@@ -209,23 +295,9 @@ export default function SettingsScreen() {
               thumbColor="#fff"
             />
           </View>
-          {widgetEnabled && (
-            <View style={[styles.widgetPreview, { backgroundColor: colors.muted, borderColor: colors.border }]}>
-              <Feather name="thermometer" size={14} color={colors.primary} />
-              <Text style={[styles.widgetPreviewText, { color: colors.foreground }]}>
-                TerraBreed  ·  {sensor.temp.toFixed(1)}°C  |  {sensor.humidity.toFixed(0)}%
-              </Text>
-            </View>
-          )}
-          <View style={[styles.infoBox, { backgroundColor: colors.primary + "11" }]}>
-            <Feather name="info" size={13} color={colors.primary} />
-            <Text style={[styles.infoText, { color: colors.mutedForeground }]}>
-              Widget homescreen native tersedia setelah install dari App Store (production build).
-            </Text>
-          </View>
         </View>
 
-        {/* Incubation Session */}
+        {/* Sesi Inkubasi */}
         <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>SESI INKUBASI</Text>
         {incubation.active ? (
           <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -238,12 +310,16 @@ export default function SettingsScreen() {
                 {incubation.species?.charAt(0).toUpperCase()}{incubation.species?.slice(1)}
               </Text>
               <Text style={[styles.sessionDetail, { color: colors.mutedForeground }]}>
-                {incubation.total_eggs} telur · Hari ke-{incubation.elapsed_days}/{incubation.total_days}
+                {incubation.total_eggs ?? 0} telur · Hari ke-{incubation.elapsed_days}/{incubation.total_days}
               </Text>
             </View>
             <Pressable
-              onPress={finishIncubation}
-              style={({ pressed }) => [styles.finishBtn, { backgroundColor: colors.destructive + "18", borderColor: colors.destructive, opacity: pressed ? 0.8 : 1 }]}
+              onPress={openFinishModal}
+              style={({ pressed }) => [styles.finishBtn, {
+                backgroundColor: colors.destructive + "18",
+                borderColor: colors.destructive,
+                opacity: pressed ? 0.8 : 1,
+              }]}
             >
               <Feather name="check-circle" size={16} color={colors.destructive} />
               <Text style={[styles.finishBtnText, { color: colors.destructive }]}>Selesaikan Inkubasi</Text>
@@ -254,8 +330,8 @@ export default function SettingsScreen() {
             <Text style={[styles.cardLabel, { color: colors.foreground }]}>Buat Sesi Baru</Text>
 
             <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Jenis Hewan</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginHorizontal: -4 }}>
-              <View style={{ flexDirection: "row", gap: 8, paddingHorizontal: 4 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={{ flexDirection: "row", gap: 8 }}>
                 {(Object.keys(SPECIES_PRESETS) as SpeciesKey[]).map((k) => (
                   <Pressable
                     key={k}
@@ -313,10 +389,26 @@ export default function SettingsScreen() {
         {/* ESP32 Settings */}
         <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>PENGATURAN ESP32</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <NumberInput label="Target Suhu" value={targetTemp} onChangeText={setTargetTemp} unit="°C" />
-          <NumberInput label="Target Kelembaban" value={targetHumid} onChangeText={setTargetHumid} unit="%" />
-          <NumberInput label="Interval Balik" value={turnInterval} onChangeText={setTurnInterval} unit="menit" />
-          <NumberInput label="Durasi Motor" value={turnDuration} onChangeText={setTurnDuration} unit="detik" />
+          {[
+            { label: "Target Suhu", value: targetTemp, onChange: setTargetTemp, unit: "°C" },
+            { label: "Target Kelembaban", value: targetHumid, onChange: setTargetHumid, unit: "%" },
+            { label: "Interval Balik", value: turnInterval, onChange: setTurnInterval, unit: "menit" },
+            { label: "Durasi Motor", value: turnDuration, onChange: setTurnDuration, unit: "detik" },
+          ].map((f) => (
+            <View key={f.label} style={[styles.numInput, { borderColor: colors.border, backgroundColor: colors.card }]}>
+              <Text style={[styles.numInputLabel, { color: colors.mutedForeground }]}>{f.label}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <TextInput
+                  value={f.value}
+                  onChangeText={(v) => { isDirty.current = true; f.onChange(v); }}
+                  onBlur={() => { isDirty.current = false; }}
+                  keyboardType="numeric"
+                  style={[styles.numInputField, { color: colors.foreground }]}
+                />
+                <Text style={[styles.numInputUnit, { color: colors.mutedForeground }]}>{f.unit}</Text>
+              </View>
+            </View>
+          ))}
 
           <Pressable
             onPress={saveSettings}
@@ -328,21 +420,20 @@ export default function SettingsScreen() {
           </Pressable>
         </View>
 
-        {/* Server info */}
+        {/* Server Info */}
         <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>INFO SERVER</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <View style={styles.row}>
-            <Feather name="server" size={14} color={colors.mutedForeground} />
-            <Text style={[styles.cardSub, { color: colors.mutedForeground }]}>kendo-assistant.com</Text>
-          </View>
-          <View style={styles.row}>
-            <Feather name="cpu" size={14} color={colors.mutedForeground} />
-            <Text style={[styles.cardSub, { color: colors.mutedForeground }]}>ESP32 · incubator_01</Text>
-          </View>
-          <View style={styles.row}>
-            <Feather name="radio" size={14} color={colors.mutedForeground} />
-            <Text style={[styles.cardSub, { color: colors.mutedForeground }]}>MQTT · 10.10.10.1:1883</Text>
-          </View>
+          {[
+            { icon: "server" as const,   text: "kendo-assistant.com/terrabreed" },
+            { icon: "cpu" as const,      text: "ESP32 · incubator_01" },
+            { icon: "radio" as const,    text: "MQTT · 10.10.10.1:1883" },
+            { icon: "shield" as const,   text: "HTTPS + self-signed cert" },
+          ].map((r) => (
+            <View key={r.text} style={styles.row}>
+              <Feather name={r.icon} size={14} color={colors.mutedForeground} />
+              <Text style={[styles.cardSub, { color: colors.mutedForeground }]}>{r.text}</Text>
+            </View>
+          ))}
         </View>
       </ScrollView>
     </View>
@@ -359,11 +450,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   widgetIcon: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   cardLabel: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
-  cardSub: { fontSize: 12, fontFamily: "Inter_400Regular", marginTop: 1 },
-  widgetPreview: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10, borderRadius: 10, borderWidth: 1 },
-  widgetPreviewText: { fontSize: 12, fontFamily: "Inter_500Medium" },
-  infoBox: { flexDirection: "row", gap: 8, alignItems: "flex-start", padding: 10, borderRadius: 10 },
-  infoText: { flex: 1, fontSize: 11, fontFamily: "Inter_400Regular", lineHeight: 16 },
+  cardSub: { fontSize: 12, fontFamily: "Inter_400Regular" },
   sessionInfo: { gap: 4 },
   sessionSpecies: { fontSize: 20, fontFamily: "Inter_700Bold" },
   sessionDetail: { fontSize: 13, fontFamily: "Inter_400Regular" },
@@ -374,7 +461,6 @@ const styles = StyleSheet.create({
   speciesChipText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
   numInput: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, borderRadius: 12, borderWidth: 1 },
   numInputLabel: { fontSize: 13, fontFamily: "Inter_500Medium" },
-  numInputRight: { flexDirection: "row", alignItems: "center", gap: 4 },
   numInputField: { fontSize: 16, fontFamily: "Inter_700Bold", minWidth: 50, textAlign: "right" },
   numInputUnit: { fontSize: 12, fontFamily: "Inter_400Regular" },
   notesInput: { borderRadius: 12, padding: 12, fontSize: 13, fontFamily: "Inter_400Regular" },
@@ -382,6 +468,16 @@ const styles = StyleSheet.create({
   presetInfoText: { fontSize: 12, fontFamily: "Inter_400Regular" },
   startBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderRadius: 12 },
   startBtnText: { fontSize: 14, fontFamily: "Inter_700Bold", color: "#fff" },
-  saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderRadius: 12, marginTop: 4 },
+  saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderRadius: 12 },
   saveBtnText: { fontSize: 14, fontFamily: "Inter_700Bold", color: "#fff" },
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 24 },
+  modalBox: { width: "100%", borderRadius: 20, borderWidth: 1, padding: 24, gap: 14 },
+  modalTitle: { fontSize: 18, fontFamily: "Inter_700Bold" },
+  modalSub: { fontSize: 13, fontFamily: "Inter_400Regular" },
+  modalInput: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 12, borderRadius: 12, borderWidth: 1 },
+  modalInputLabel: { fontSize: 13, fontFamily: "Inter_500Medium" },
+  modalInputField: { fontSize: 20, fontFamily: "Inter_700Bold", minWidth: 60, textAlign: "right" },
+  modalBtns: { flexDirection: "row", gap: 10, marginTop: 4 },
+  modalBtn: { flex: 1, padding: 14, borderRadius: 12, borderWidth: 1, alignItems: "center" },
+  modalBtnText: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
 });

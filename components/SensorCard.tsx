@@ -1,92 +1,64 @@
 import React from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { useColors } from "@/hooks/useColors";
 
 interface SensorCardProps {
   icon: keyof typeof Feather.glyphMap;
   label: string;
-  value: string;
+  value: number | string;
   unit: string;
+  target?: number;
   color: string;
-  subtitle?: string;
-  status?: "ok" | "warn" | "error";
+  trend?: "up" | "down" | "stable";
 }
 
-export function SensorCard({
-  icon,
-  label,
-  value,
-  unit,
-  color,
-  subtitle,
-  status = "ok",
-}: SensorCardProps) {
+export function SensorCard({ icon, label, value, unit, target, color, trend }: SensorCardProps) {
   const colors = useColors();
-
-  const statusColor =
-    status === "ok"
-      ? colors.accent
-      : status === "warn"
-        ? colors.warning
-        : colors.destructive;
+  const numVal = typeof value === "string" ? parseFloat(value) : value;
+  const isOk = target !== undefined
+    ? Math.abs(numVal - target) <= (target * 0.03)
+    : true;
+  const statusColor = isOk ? colors.accent : colors.warning;
+  const trendIcon = trend === "up" ? "trending-up" : trend === "down" ? "trending-down" : "minus";
 
   return (
-    <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <View style={[styles.iconWrap, { backgroundColor: color + "22" }]}>
-        <Feather name={icon} size={20} color={color} />
+    <View style={[styles.root, { backgroundColor: colors.card, borderColor: colors.border }]}>
+      <View style={[styles.iconWrap, { backgroundColor: color + "18" }]}>
+        <Feather name={icon} size={18} color={color} />
       </View>
-      <Text style={[styles.label, { color: colors.mutedForeground }]}>{label}</Text>
-      <View style={styles.valueRow}>
-        <Text style={[styles.value, { color: colors.foreground }]}>{value}</Text>
-        <Text style={[styles.unit, { color: colors.mutedForeground }]}>{unit}</Text>
+      <View style={styles.body}>
+        <Text style={[styles.label, { color: colors.mutedForeground }]}>{label}</Text>
+        <View style={styles.valueRow}>
+          <Text style={[styles.value, { color: colors.foreground }]}>
+            {typeof value === "number" ? value.toFixed(1) : value}
+          </Text>
+          <Text style={[styles.unit, { color: colors.mutedForeground }]}>{unit}</Text>
+          {trend && <Feather name={trendIcon} size={14} color={statusColor} style={styles.trend} />}
+        </View>
+        {target !== undefined && (
+          <Text style={[styles.target, { color: colors.mutedForeground }]}>
+            Target:{" "}
+            <Text style={{ color: statusColor, fontFamily: "Inter_600SemiBold" }}>
+              {target.toFixed(1)}{unit}
+            </Text>
+          </Text>
+        )}
       </View>
-      {subtitle ? (
-        <Text style={[styles.subtitle, { color: statusColor }]}>{subtitle}</Text>
-      ) : null}
+      <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  card: {
-    borderRadius: 16,
-    padding: 16,
-    flex: 1,
-    borderWidth: 1,
-    gap: 6,
-  },
-  iconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 2,
-  },
-  label: {
-    fontSize: 11,
-    fontFamily: "Inter_500Medium",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-  valueRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 2,
-  },
-  value: {
-    fontSize: 22,
-    fontFamily: "Inter_700Bold",
-    letterSpacing: -0.5,
-  },
-  unit: {
-    fontSize: 13,
-    fontFamily: "Inter_400Regular",
-    paddingBottom: 2,
-  },
-  subtitle: {
-    fontSize: 11,
-    fontFamily: "Inter_400Regular",
-  },
+  root: { flex: 1, borderRadius: 14, borderWidth: 1, padding: 14, flexDirection: "row", alignItems: "center", gap: 12 },
+  iconWrap: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  body: { flex: 1, gap: 2 },
+  label: { fontSize: 11, fontFamily: "Inter_500Medium" },
+  valueRow: { flexDirection: "row", alignItems: "baseline", gap: 4 },
+  value: { fontSize: 22, fontFamily: "Inter_700Bold", letterSpacing: -0.5 },
+  unit: { fontSize: 12, fontFamily: "Inter_500Medium" },
+  trend: { marginLeft: 2 },
+  target: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  statusDot: { width: 8, height: 8, borderRadius: 4, position: "absolute", top: 10, right: 10 },
 });

@@ -17,6 +17,8 @@ import * as Haptics from "expo-haptics";
 import * as Notifications from "expo-notifications";
 
 import { useColors } from "@/hooks/useColors";
+import { router } from "expo-router";
+import { useServer } from "@/context/ServerContext";
 import { useIncubator } from "@/context/IncubatorContext";
 import { API, apiFetch } from "@/constants/api";
 
@@ -42,7 +44,8 @@ const SPECIES_PRESETS: Record<SpeciesKey, { temp: number; humid: number; days: n
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { sensor, status, incubation, refreshNow } = useIncubator();
+  const { sensor, status, incubation, isConnected, refreshNow } = useIncubator();
+  const { serverUrl } = useServer();
   const topPad = Platform.OS === "web" ? 67 : insets.top;
 
   // isDirty: true saat user sedang edit — cegah useEffect reset input
@@ -423,17 +426,38 @@ export default function SettingsScreen() {
         {/* Server Info */}
         <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>INFO SERVER</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <View style={styles.row}>
+            <Feather name="server" size={14} color={colors.mutedForeground} />
+            <Text style={[styles.cardSub, { color: colors.mutedForeground, flex: 1 }]} numberOfLines={1}>
+              {serverUrl.replace("https://","").replace("http://","")}
+            </Text>
+            <View style={[styles.connDot, { backgroundColor: isConnected ? colors.accent : colors.destructive }]} />
+            <Text style={[styles.connText, { color: isConnected ? colors.accent : colors.destructive }]}>
+              {isConnected ? "Terhubung" : "Offline"}
+            </Text>
+          </View>
           {[
-            { icon: "server" as const,   text: "kendo-assistant.com/terrabreed" },
-            { icon: "cpu" as const,      text: "ESP32 · incubator_01" },
-            { icon: "radio" as const,    text: "MQTT · 10.10.10.1:1883" },
-            { icon: "shield" as const,   text: "HTTPS + self-signed cert" },
+            { icon: "cpu" as const,   text: "ESP32 · incubator_01" },
+            { icon: "radio" as const, text: "MQTT · 10.10.10.1:1883" },
+            { icon: "shield" as const, text: "HTTPS + self-signed cert" },
           ].map((r) => (
             <View key={r.text} style={styles.row}>
               <Feather name={r.icon} size={14} color={colors.mutedForeground} />
               <Text style={[styles.cardSub, { color: colors.mutedForeground }]}>{r.text}</Text>
             </View>
           ))}
+          <Pressable
+            onPress={() => router.push("/server-setup")}
+            style={({ pressed }) => [styles.changeServerBtn, {
+              backgroundColor: colors.primary + "15",
+              borderColor: colors.primary + "44",
+              opacity: pressed ? 0.8 : 1,
+            }]}
+          >
+            <Feather name="settings" size={14} color={colors.primary} />
+            <Text style={[styles.changeServerText, { color: colors.primary }]}>Ganti / Scan Server</Text>
+            <Feather name="chevron-right" size={14} color={colors.primary} style={{ marginLeft: "auto" }} />
+          </Pressable>
         </View>
       </ScrollView>
     </View>
@@ -480,4 +504,8 @@ const styles = StyleSheet.create({
   modalBtns: { flexDirection: "row", gap: 10, marginTop: 4 },
   modalBtn: { flex: 1, padding: 14, borderRadius: 12, borderWidth: 1, alignItems: "center" },
   modalBtnText: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  connDot: { width: 7, height: 7, borderRadius: 4 },
+  connText: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
+  changeServerBtn: { flexDirection: "row", alignItems: "center", gap: 8, padding: 12, borderRadius: 12, borderWidth: 1 },
+  changeServerText: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
 });

@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { IncubatorProvider } from "@/context/IncubatorContext";
+import { ServerProvider } from "@/context/ServerContext";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import colors from "@/constants/colors";
 
@@ -33,20 +34,23 @@ export default function RootLayout() {
     <ErrorBoundary>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
-          <IncubatorProvider>
-            <Stack
-              screenOptions={{
-                headerShown: false,
-                contentStyle: { backgroundColor: theme.background },
-                animation: "slide_from_right",
-              }}
-            >
-              <Stack.Screen name="(tabs)" />
-              <Stack.Screen name="incubation-detail" options={{ animation: "slide_from_bottom", presentation: "modal" }} />
-              <Stack.Screen name="history" />
-              <Stack.Screen name="+not-found" />
-            </Stack>
-          </IncubatorProvider>
+          <ServerProvider>
+            <IncubatorProvider>
+              <Stack
+                screenOptions={{
+                  headerShown: false,
+                  contentStyle: { backgroundColor: theme.background },
+                  animation: "slide_from_right",
+                }}
+              >
+                <Stack.Screen name="(tabs)" />
+                <Stack.Screen name="server-setup" options={{ animation: "slide_from_bottom", presentation: "modal" }} />
+                <Stack.Screen name="incubation-detail" options={{ animation: "slide_from_bottom", presentation: "modal" }} />
+                <Stack.Screen name="history" />
+                <Stack.Screen name="+not-found" />
+              </Stack>
+            </IncubatorProvider>
+          </ServerProvider>
         </SafeAreaProvider>
       </GestureHandlerRootView>
     </ErrorBoundary>

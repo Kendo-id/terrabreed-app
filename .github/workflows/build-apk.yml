@@ -33,8 +33,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install --legacy-peer-deps || npm install --force
-          echo "Installed OK"
+          node --version
+          npm --version
+          npm install --legacy-peer-deps --loglevel verbose 2>&1 | tee /tmp/npm-install.log
+          EXIT=${PIPESTATUS[0]}
+          if [ $EXIT -ne 0 ]; then
+            echo '=== npm install failed, trying --force ==='
+            npm install --force --loglevel verbose 2>&1 | tee /tmp/npm-install-force.log
+          fi
+          echo 'node_modules OK'
 
       - name: Expo prebuild
         env:
@@ -94,11 +101,14 @@ jobs:
           path: output/TerraBreed.apk
           retention-days: 30
 
-      - name: Upload Gradle log on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-log
-          path: /tmp/gradle.log
+          name: build-logs
+          path: |
+            /tmp/gradle.log
+            /tmp/npm-install.log
+            /tmp/npm-install-force.log
           retention-days: 7
           if-no-files-found: ignore

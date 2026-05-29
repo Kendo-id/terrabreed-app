@@ -17,6 +17,8 @@ import { router } from "expo-router";
 import Svg, { Path, Line, Text as SvgText, Circle } from "react-native-svg";
 
 import { useColors } from "@/hooks/useColors";
+import { router } from "expo-router";
+import { useServer } from "@/context/ServerContext";
 import { useIncubator } from "@/context/IncubatorContext";
 import { GaugeCircle } from "@/components/GaugeCircle";
 import { SensorCard } from "@/components/SensorCard";
@@ -115,6 +117,7 @@ function LiveChart({
 export default function DashboardScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const { serverUrl } = useServer();
   const { sensor, status, incubation, history, isConnected, isLoading, lastUpdated, refreshNow } = useIncubator();
   const [refreshing, setRefreshing] = useState(false);
 
